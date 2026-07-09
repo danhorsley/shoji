@@ -35,6 +35,12 @@ def main():
                 elif event.key == pygame.K_n:
                     game.next_level()
                     fit_window()
+                elif event.key == pygame.K_c:
+                    game.curate_save()
+                elif event.key == pygame.K_g:
+                    # Hunt for a non-trivial puzzle and auto-curate it
+                    game.hunt_curated(max_tries=80)
+                    fit_window()
                 elif event.key in (pygame.K_UP, pygame.K_w):
                     game.handle_move(0, -1)
                 elif event.key in (pygame.K_DOWN, pygame.K_s):

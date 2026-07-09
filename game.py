@@ -1,17 +1,21 @@
 import ast
 import json
 import os
+import time
 from collections import deque
+from datetime import datetime
 
 import pygame
 
-from level_generator import generate_level
+from level_generator import density_score, generate_level
 from solver import (
     apply_toggle,
     can_activate,
     connected_component,
     find_solution,
     is_solvable,
+    is_trivial_solution,
+    meets_curate_quality,
     meets_quality,
     score_solution,
 )
@@ -22,6 +26,8 @@ DOOR_THICKNESS = 10
 DOOR_CLICK_PAD = 14
 PANEL_WIDTH = 248
 HUD_HEIGHT = 56
+CURATED_DIR = os.path.join("levels", "curated")
+BUTTON_H = 32
 
 # Scene colors
 BG = (22, 26, 32)
@@ -91,6 +97,9 @@ class Game:
         self.status = ""  # click feedback
         self.chain_ids = {}  # edge -> chain index
         self.chain_list = []  # list of components
+        self.start_player = (0, 0)  # spawn for restart / curate
+        self.curate_btn_rect = None  # set during draw
+        self.last_curated_path = ""
 
     # --- layout -----------------------------------------------------------
 
@@ -132,14 +141,15 @@ class Game:
                 return False
         return True
 
-    def _generate_until_solvable(self, level_num, attempts=80):
+    def _generate_until_solvable(self, level_num, attempts=120):
         """
-        Generate until solvable + multi-phase quality:
-        detour / double-back / off-spine switch toggles.
-        Keeps the best-scoring candidate if thresholds are never fully met.
+        Hunt for non-trivial multi-phase puzzles.
+        Rejects one-toggle open-exit solutions; keeps best non-trivial if none pass.
         """
-        best = None  # (score, snapshot, details)
+        best = None  # (combined, score, snap, details)
+        best_any = None
         difficulty = level_num
+        seen_good = 0
 
         for i in range(attempts):
             w, h, walls, player, exit_pos, doors = generate_level(level_num=level_num)
@@ -147,9 +157,14 @@ class Game:
             self.height = h
             self.walls = walls
             self.player_pos = player
+            self.start_player = player
             self.exit_pos = exit_pos
             self.doors = {edge_key(e): normalize_door(d) for e, d in doors.items()}
             self._rebuild_chains()
+
+            dens_s, _ = density_score(
+                self.walls, self.width, self.height, self.doors, difficulty
+            )
 
             if self._exit_reachable_without_toggles():
                 continue
@@ -162,38 +177,94 @@ class Game:
             if score < 0:
                 continue
 
+            combined = score + 0.2 * dens_s
             snap = self._snapshot()
-            if best is None or score > best[0]:
-                best = (score, snap, details)
+            if best_any is None or combined > best_any[0]:
+                best_any = (combined, score, snap, details)
+
+            if is_trivial_solution(details):
+                continue
+
+            if best is None or combined > best[0]:
+                best = (combined, score, snap, details)
                 print(
-                    f"  candidate score={score} toggles={details.get('toggles')} "
-                    f"revisits={details.get('revisits')} "
-                    f"off_spine={details.get('off_spine_toggles')} "
-                    f"multi_phase={details.get('multi_phase')}"
+                    f"  candidate score={score} {w}x{h} moves={details.get('moves')} "
+                    f"toggles={details.get('toggles')} multi={details.get('multi_phase')} "
+                    f"chains={details.get('chains_used')} sites={details.get('toggle_sites')}"
                 )
 
             if meets_quality(score, details, difficulty):
-                print(f"Level {level_num}: accepted quality score={score} ({details})")
+                seen_good += 1
+                print(
+                    f"Level {level_num}: accepted {w}x{h} score={score} "
+                    f"moves={details.get('moves')} toggles={details.get('toggles')} "
+                    f"multi={details.get('multi_phase')} chains={details.get('chains_used')}"
+                )
+                self.start_player = self.player_pos
                 self.save_level()
                 return
 
-        if best is not None:
+        pick = best or best_any
+        if pick is not None:
             print(
-                f"Level {level_num}: using best candidate score={best[0]} "
-                f"({best[2]}) after {attempts} tries"
+                f"Level {level_num}: best non-trivial-or-any score={pick[1]} "
+                f"after {attempts} tries (good_hits={seen_good}) "
+                f"multi={pick[3].get('multi_phase')} toggles={pick[3].get('toggles')}"
             )
-            self._restore(best[1])
+            self._restore(pick[2])
         else:
-            print(f"Level {level_num}: fallback raw generate (no scored solution)")
+            print(f"Level {level_num}: fallback raw generate")
             w, h, walls, player, exit_pos, doors = generate_level(level_num=level_num)
             self.width = w
             self.height = h
             self.walls = walls
             self.player_pos = player
+            self.start_player = player
             self.exit_pos = exit_pos
             self.doors = {edge_key(e): normalize_door(d) for e, d in doors.items()}
             self._rebuild_chains()
+        self.start_player = self.player_pos
         self.save_level()
+
+    def hunt_curated(self, max_tries=80, difficulty=None):
+        """
+        Generate until a curate-worthy puzzle appears; load it and save to curated/.
+        Returns path or None.
+        """
+        if difficulty is None:
+            difficulty = self.current_level
+        print(f"Hunting curate-worthy puzzle (up to {max_tries} tries)...")
+        for i in range(max_tries):
+            w, h, walls, player, exit_pos, doors = generate_level(level_num=difficulty)
+            self.width = w
+            self.height = h
+            self.walls = walls
+            self.player_pos = player
+            self.start_player = player
+            self.exit_pos = exit_pos
+            self.doors = {edge_key(e): normalize_door(d) for e, d in doors.items()}
+            self._rebuild_chains()
+            if self._exit_reachable_without_toggles():
+                continue
+            info = find_solution(self)
+            if not info:
+                continue
+            score, details = score_solution(info, self)
+            if meets_curate_quality(score, details, difficulty):
+                print(
+                    f"Hunt success try={i+1}/{max_tries} score={score} "
+                    f"toggles={details.get('toggles')} multi={details.get('multi_phase')} "
+                    f"sites={details.get('toggle_sites')}"
+                )
+                self.start_player = player
+                path = self.curate_save()
+                self.status = f"Hunt OK → {path}"
+                return path
+            if (i + 1) % 20 == 0:
+                print(f"  hunt progress {i+1}/{max_tries}...")
+        self.status = "Hunt found nothing — try again (G)"
+        print("Hunt failed to find curate-worthy puzzle")
+        return None
 
     def _snapshot(self):
         return {
@@ -201,6 +272,7 @@ class Game:
             "height": self.height,
             "walls": set(self.walls),
             "player": self.player_pos,
+            "start_player": self.start_player,
             "exit": self.exit_pos,
             "doors": {
                 e: {
@@ -218,6 +290,7 @@ class Game:
         self.height = snap["height"]
         self.walls = set(snap["walls"])
         self.player_pos = snap["player"]
+        self.start_player = snap.get("start_player", snap["player"])
         self.exit_pos = snap["exit"]
         self.doors = {
             e: {
@@ -260,6 +333,7 @@ class Game:
         self.width = int(data["width"])
         self.height = int(data["height"])
         self.player_pos = tuple(data["player"])
+        self.start_player = tuple(data.get("player", self.player_pos))
         self.exit_pos = tuple(data["exit"])
         self.walls = {edge_key(e) for e in data.get("walls", [])}
         self.doors = {
@@ -267,11 +341,16 @@ class Game:
         }
         self._rebuild_chains()
 
-    def save_level(self):
+    def _level_dict(self, player=None, doors=None, meta=None):
+        """Serialize current (or provided) puzzle state to a JSON-ready dict."""
+        if player is None:
+            player = self.start_player
+        if doors is None:
+            doors = self.doors
         data = {
             "width": self.width,
             "height": self.height,
-            "player": list(self.player_pos),
+            "player": list(player),
             "exit": list(self.exit_pos),
             "walls": [list(e) for e in sorted(self.walls)],
             "doors": {
@@ -281,12 +360,61 @@ class Game:
                     "kind": v.get("kind", "local"),
                     "handle": v.get("handle", "a"),
                 }
-                for k, v in self.doors.items()
+                for k, v in doors.items()
             },
         }
+        if meta:
+            data["meta"] = meta
+        return data
+
+    def save_level(self):
+        """Autosave working level (spawn + current door states)."""
+        data = self._level_dict(player=self.start_player, doors=self.doors)
         os.makedirs("levels", exist_ok=True)
         with open(f"levels/level_{self.current_level}.json", "w") as f:
             json.dump(data, f, indent=2)
+
+    def curate_save(self):
+        """
+        Save a curated copy under levels/curated/.
+
+        Uses spawn position as player start, and **current door states**
+        (so you can toggle into a nice starting config, then curate).
+        """
+        os.makedirs(CURATED_DIR, exist_ok=True)
+        # Next free curated_###.json
+        n = 1
+        while os.path.exists(os.path.join(CURATED_DIR, f"curated_{n:03d}.json")):
+            n += 1
+        path = os.path.join(CURATED_DIR, f"curated_{n:03d}.json")
+
+        # Optional quality snapshot for notes
+        # Temporarily set player to start for scoring the curated start state
+        saved_pos = self.player_pos
+        self.player_pos = self.start_player
+        info = find_solution(self)
+        score, details = score_solution(info, self) if info else (-1, {})
+        self.player_pos = saved_pos
+
+        meta = {
+            "curated_at": datetime.now().isoformat(timespec="seconds"),
+            "from_level": self.current_level,
+            "quality_score": score,
+            "quality": details,
+            "unix": int(time.time()),
+        }
+        data = self._level_dict(
+            player=self.start_player,
+            doors=self.doors,
+            meta=meta,
+        )
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+        self.last_curated_path = path
+        self.status = f"Curated → {path}"
+        print(f"Curated level saved: {path} (score={score})")
+        return path
 
     def _rebuild_chains(self):
         self.chain_ids = {}
@@ -312,7 +440,11 @@ class Game:
 
     def handle_click(self, pos):
         mx, my = pos
-        # Ignore clicks on the dictionary panel
+        # Curate button on the side panel
+        if self.curate_btn_rect and self.curate_btn_rect.collidepoint(mx, my):
+            self.curate_save()
+            return
+
         maze_w = self.width * TILE_SIZE
         if mx >= maze_w:
             return
@@ -624,6 +756,18 @@ class Game:
         self.screen.blit(title, (x, y))
         y += 28
 
+        # Curate / save button near top so it's always visible
+        btn = pygame.Rect(x, y, panel.width - 20, BUTTON_H)
+        self.curate_btn_rect = btn
+        pygame.draw.rect(self.screen, (48, 92, 70), btn, border_radius=4)
+        pygame.draw.rect(self.screen, (120, 200, 150), btn, 1, border_radius=4)
+        label = self.font_sm.render("★ Curate / Save  (C)", True, (230, 245, 235))
+        self.screen.blit(
+            label,
+            (btn.x + (btn.width - label.get_width()) // 2, btn.y + 7),
+        )
+        y = btn.bottom + 10
+
         # Legend: kinds
         y = self._panel_line(x, y, "TYPES", bold=True)
         y = self._legend_row(x, y, "local", "Local — click when adjacent")
@@ -698,7 +842,7 @@ class Game:
     def _draw_hud(self):
         y = self.height * TILE_SIZE + 8
         hud = self.font_sm.render(
-            f"Lv {self.current_level}  |  WASD/Arrows  |  Click usable shoji  |  R restart  |  N next",
+            f"Lv {self.current_level}  |  WASD  |  Click  |  C curate  |  G hunt  |  R  |  N",
             True,
             HUD,
         )

@@ -16,6 +16,13 @@ python main.py
 | **Click** a usable shoji | Flip its whole chain |
 | **R** | Restart level |
 | **N** | Next level |
+| **C** or **★ Curate / Save** | Save current puzzle to `levels/curated/curated_###.json` |
+| **G** | **Hunt** — generate until a non-trivial multi-phase puzzle appears, then auto-curate |
+
+Batch hunt (offline):
+```bash
+python hunt_batch.py 10      # save ~10 keepers
+```
 
 Usable doors **glow** in their chain color when you stand where you can operate them.
 
@@ -39,13 +46,17 @@ Usable doors **glow** in their chain color when you stand where you can operate 
 - Right panel = **door dictionary** (types + live chain status)
 
 ### Level model
-Edge-based geometry with a **switch-room template**:
-- Entry room + side **switch** room + **exit wing**
-- Exit cut is often a **remote** door
-- Switch holds a **local / one-way** control on the same chain (mixed polarity)
-- Typical solve: enter switch → flip chain → **double back** → exit wing
+**Compact chamber puzzles** (Quell-shaped efficiency, shoji rules):
+- Small boards (~6×5, grow slowly with level)
+- Macro rooms: entry · switch · exit (no heavy maze-fill)
+- Exit cut is a **remote**; switch has a **local / one-way** control
+- Typical solve: enter switch → flip → short double-back → exit
 
-Generation searches for multi-phase solutions (toggles, revisits, off-spine
-switch use) — not just “solvable.”
+Generation filters for **decision density**:
+- short solutions (move caps)
+- low moves-per-toggle
+- off-spine switch use + revisits
 
 Edges: `("v", x, y)` vertical · `("h", x, y)` horizontal
+
+Use **C** / Curate to keep gems in `levels/curated/`.

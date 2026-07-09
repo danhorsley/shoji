@@ -1,10 +1,10 @@
 """
-Room-first / switch-room maze generation.
+Compact multi-phase chamber puzzles for curation.
 
-Biased toward multi-phase puzzles:
-  entry  →  side switch room (local / one-way control)
-         →  backtrack
-         →  exit wing (remote door opened by the switch chain)
+Primary joke is no longer "one switch → open exit". Templates force
+at least two decisions (two chains / two remotes in series).
+
+Layouts stay small (one screen). Outer loop rejects trivial solutions.
 
 Edge keys:
   ("v", x, y) — vertical edge at column-line x, row y
@@ -20,250 +20,627 @@ def generate_level(w=None, h=None, level_num=0, difficulty=None):
         difficulty = max(0, int(level_num))
 
     if w is None:
-        w = min(10 + difficulty // 2, 14)
+        w = min(6 + difficulty // 3, 8)
     if h is None:
-        h = min(7 + difficulty // 2, 11)
+        h = min(5 + difficulty // 3, 7)
 
-    # Prefer structured switch-room template; fall back to division maze
-    if random.random() < 0.85:
-        result = _generate_switch_template(w, h, difficulty)
+    # Weighted template mix — prefer multi-phase structures
+    roll = random.random()
+    builders = []
+    if roll < 0.55:
+        builders = [_generate_two_phase, _generate_two_phase, _generate_cross_link]
+    elif roll < 0.85:
+        builders = [_generate_cross_link, _generate_two_phase]
+    else:
+        builders = [_generate_simple_switch, _generate_two_phase]
+
+    for builder in builders:
+        for _ in range(6):
+            result = builder(w, h, difficulty)
+            if result is not None:
+                return result
+
+    # Last resorts
+    for builder in (_generate_two_phase, _generate_cross_link, _generate_simple_switch):
+        result = builder(max(w, 6), max(h, 5), difficulty)
         if result is not None:
             return result
-    return _generate_division_fallback(w, h, difficulty)
+    return _minimal_fallback(w, h)
 
 
 # ---------------------------------------------------------------------------
-# Switch-room template (primary)
+# Template A: two serial remotes (true multi-phase)
 # ---------------------------------------------------------------------------
 
-def _generate_switch_template(w, h, difficulty):
+def _generate_two_phase(w, h, difficulty):
     """
-    Layout (example):
+    Four chambers:
 
-        +--------+----------+
-        | SWITCH |          |
-        |  [ctrl]|   EXIT   |
-        +---gap--+   WING   |
-        | ENTRY  |          |
-        | start  |   exit   |
-        +--------+----------+
+        +--------+--------+
+        | SWITCH |  GOAL  |
+        |  [S1]  |   X    |
+        +---g----+--R2----+
+        | ENTRY  |  MID   |
+        |   P    |  [S2]  |
+        +--------+--R1----  (R1 on vertical between entry|mid)
 
-    - Open gap into SWITCH (or local door that starts open)
-    - Control shoji in SWITCH (local or one-way from inside)
-    - REMOTE door on cut into EXIT wing, same chain, opposite polarity
-    - Optional second remote / chain at higher difficulty
+    R1 (remote) blocks entry→mid, opened by S1 in switch.
+    R2 (remote) blocks mid→goal, opened by S2 in mid.
+    After S1 only, exit still unreachable → multi-phase.
     """
-    if w < 8 or h < 6:
-        w, h = max(w, 8), max(h, 6)
+    if w < 6 or h < 5:
+        w, h = max(w, 6), max(h, 5)
 
     walls = _outer_walls_only(w, h)
+    vx = max(2, min(w // 2, w - 3))
+    hy = max(2, min(h // 2, h - 2))
 
-    # Partition lines
-    vx = max(3, min(w // 2, w - 4))  # vertical cut: left living / right exit
-    hy = max(2, min(h // 2, h - 3))  # horizontal cut on left: switch / entry
-
-    # Vertical partition (entry+switch | exit wing)
+    # Vertical macro cut
     for y in range(h):
         walls.add(("v", vx, y))
+    # Horizontal cuts on both sides
+    for x in range(w):
+        walls.add(("h", x, hy))
 
-    # Horizontal partition on left only (switch above, entry below)
+    # Portals
+    # Switch entry: gap on left horizontal
+    g_x = max(0, min(vx - 1, vx // 2))
+    switch_entry = ("h", g_x, hy)
+    walls.discard(switch_entry)
+
+    # R1: entry (left-bottom) → mid (right-bottom)
+    r1_ys = [y for y in range(hy, h) if 0 < y < h - 1]
+    if not r1_ys:
+        r1_ys = list(range(hy, h))
+    r1_y = random.choice(r1_ys)
+    r1 = ("v", vx, r1_y)
+    walls.discard(r1)
+    _force_flanks(walls, r1, w, h)
+
+    # R2: mid (right-bottom) → goal (right-top)
+    r2_xs = [x for x in range(vx, w) if 0 < x < w - 1]
+    if not r2_xs:
+        r2_xs = list(range(vx, w))
+    r2_x = random.choice(r2_xs)
+    r2 = ("h", r2_x, hy)
+    walls.discard(r2)
+    _force_flanks(walls, r2, w, h)
+
+    # Seal left-top from right-top (already have vertical wall)
+    # Optional: no direct switch→goal portal (forces path through mid)
+
+    switch_cells = [(x, y) for y in range(hy) for x in range(vx)]
+    entry_cells = [(x, y) for y in range(hy, h) for x in range(vx)]
+    mid_cells = [(x, y) for y in range(hy, h) for x in range(vx, w)]
+    goal_cells = [(x, y) for y in range(hy) for x in range(vx, w)]
+
+    if not all([switch_cells, entry_cells, mid_cells, goal_cells]):
+        return None
+
+    # Light detail only
+    for cells in (switch_cells, entry_cells, mid_cells, goal_cells):
+        _light_chamber_detail(walls, cells, w, h, {switch_entry, r1, r2})
+
+    # Re-seal macros except portals
+    for y in range(h):
+        e = ("v", vx, y)
+        if e != r1:
+            walls.add(e)
+        else:
+            walls.discard(e)
+    for x in range(w):
+        e = ("h", x, hy)
+        if e in (switch_entry, r2):
+            walls.discard(e)
+        else:
+            walls.add(e)
+
+    s1 = _place_control_in_region(walls, switch_cells, w, h, {switch_entry, r1, r2})
+    s2 = _place_control_in_region(walls, mid_cells, w, h, {switch_entry, r1, r2, s1} if s1 else {switch_entry, r1, r2})
+    if s1 is None or s2 is None or s1 == s2:
+        return None
+
+    player = _pick_cell(entry_cells, prefer=(g_x, min(h - 1, hy)))
+    exit_pos = _pick_cell(goal_cells, prefer=(w - 1, 0))
+
+    doors = {
+        s1: {
+            "state": 0,
+            "linked": [list(r1)],
+            "kind": "onesided" if random.random() < 0.55 else "local",
+            "handle": _handle_toward(s1, (vx // 2, hy // 2)),
+        },
+        r1: {
+            "state": 1,
+            "linked": [list(s1)],
+            "kind": "remote",
+            "handle": "a",
+        },
+        s2: {
+            "state": 0,
+            "linked": [list(r2)],
+            "kind": "onesided" if random.random() < 0.45 else "local",
+            "handle": _handle_toward(s2, (vx + 1, hy + 1)),
+        },
+        r2: {
+            "state": 1,
+            "linked": [list(s2)],
+            "kind": "remote",
+            "handle": "a",
+        },
+    }
+    if doors[s1]["kind"] != "onesided":
+        doors[s1]["handle"] = "a"
+    if doors[s2]["kind"] != "onesided":
+        doors[s2]["handle"] = "a"
+
+    # Structural checks with real door open/closed (gaps are doors, not free air)
+    open_all = {e: 0 for e in doors}
+    only_r1 = {e: doors[e]["state"] for e in doors}
+    only_r1[r1] = 0
+    only_r1[s1] = 1  # after flipping chain1: r1 open, s1 closed
+    # Actually after flip of s1-r1: both toggle — r1:1→0, s1:0→1
+    after_s1 = {e: doors[e]["state"] for e in doors}
+    after_s1[r1] = 0
+    after_s1[s1] = 1
+
+    if exit_pos not in _reachable(player, w, h, walls, doors, open_all):
+        return None
+    # After only first chain flip, exit still blocked (need s2)
+    if exit_pos in _reachable(player, w, h, walls, doors, after_s1):
+        return None
+    # Mid should be reachable after first chain
+    mid_anchor = mid_cells[0]
+    if mid_anchor not in _reachable(player, w, h, walls, doors, after_s1):
+        return None
+
+    return _finalize(w, h, walls, player, exit_pos, doors, switch_entry)
+
+
+# ---------------------------------------------------------------------------
+# Template B: cross-link (opening A messes with B)
+# ---------------------------------------------------------------------------
+
+def _generate_cross_link(w, h, difficulty):
+    """
+    Three doors on one chain with mixed polarity, plus a second independent
+    remote on the exit. S in switch flips chain that opens mid-gate but
+    closes something — actually simpler:
+
+    Chain A: S1 <-> R_exit (opposite)  — classic
+    Chain B: S2 <-> R_block on path to S1  — must open R_block first via S2
+             then go to S1, then exit.
+
+    S2 in entry (local), R_block between entry and switch path,
+    S1 in switch, R_exit to goal.
+    """
+    if w < 6 or h < 5:
+        w, h = max(w, 6), max(h, 5)
+
+    walls = _outer_walls_only(w, h)
+    vx = max(2, min(w // 2, w - 3))
+    hy = max(2, min(h // 2, h - 2))
+
+    for y in range(h):
+        walls.add(("v", vx, y))
     for x in range(vx):
         walls.add(("h", x, hy))
 
-    # --- Gaps / doors ---
-    # Switch entry: open gap near middle of horizontal wall (no door → free enter/leave)
-    sw_gap_x = max(1, min(vx - 2, vx // 2))
-    walls.discard(("h", sw_gap_x, hy))
+    # Switch entry is a REMOTE (blocked until S2)
+    g_x = max(0, min(vx - 1, vx // 2))
+    r_block = ("h", g_x, hy)
+    walls.discard(r_block)
+    _force_flanks(walls, r_block, w, h)
 
-    # Exit cut: remote door on vertical partition (lower half = from entry)
-    exit_door_y = min(h - 2, max(hy, hy + (h - hy) // 2))
-    # Prefer a cell-row entirely in the entry band when possible
-    exit_door_y = random.randint(hy, h - 1) if hy < h - 1 else h - 2
-    walls.discard(("v", vx, exit_door_y))
-    exit_remote = ("v", vx, exit_door_y)
+    # Exit remote on vertical cut
+    r_ys = [y for y in range(0, h) if 0 < y < h - 1]
+    r_y = random.choice(r_ys) if r_ys else h // 2
+    # Prefer exit in lower or upper — put exit chamber on right
+    r_exit = ("v", vx, r_y)
+    walls.discard(r_exit)
+    _force_flanks(walls, r_exit, w, h)
 
-    # Optional second gap into exit wing from switch (usually walled — forces return)
-    # Leave sealed for double-back; at low difficulty sometimes open as red herring wall gap
-    if difficulty == 0 and random.random() < 0.15:
-        y2 = random.randint(0, max(0, hy - 1))
-        walls.discard(("v", vx, y2))
+    for y in range(h):
+        e = ("v", vx, y)
+        if e != r_exit:
+            walls.add(e)
+        else:
+            walls.discard(e)
+    for x in range(vx):
+        e = ("h", x, hy)
+        if e != r_block:
+            walls.add(e)
+        else:
+            walls.discard(e)
 
-    # Control door: small alcove inside switch room
-    # Place a short wall with a door edge inside switch (y < hy, x < vx)
-    ctrl = _place_switch_control(walls, vx, hy, w, h)
-    if ctrl is None:
+    switch_cells = [(x, y) for y in range(hy) for x in range(vx)]
+    entry_cells = [(x, y) for y in range(hy, h) for x in range(vx)]
+    # Right side open as exit wing
+    exit_cells = [(x, y) for y in range(h) for x in range(vx, w)]
+
+    s1 = _place_control_in_region(walls, switch_cells, w, h, {r_block, r_exit})
+    s2 = _place_control_in_region(walls, entry_cells, w, h, {r_block, r_exit, s1} if s1 else {r_block, r_exit})
+    if s1 is None or s2 is None or s1 == s2:
         return None
 
-    # Player in entry, exit in exit wing
-    player = (max(1, sw_gap_x - 1), min(h - 2, hy + 1))
-    # Ensure player cell not in wall (cells are all open; walls are edges)
-    if player[0] >= vx:
-        player = (vx - 2, player[1])
-    if player[1] < hy:
-        player = (player[0], hy)
+    player = _pick_cell(entry_cells)
+    exit_pos = _pick_cell(exit_cells)
 
-    exit_pos = (min(w - 2, vx + 1 + random.randint(0, max(0, w - vx - 3))), random.randint(1, h - 2))
-    if exit_pos[0] < vx:
-        exit_pos = (vx + 1, exit_pos[1])
-
-    # Connectivity check with exit open
-    if not _cells_connected(player, exit_pos, w, h, walls, {exit_remote, ctrl}):
-        # try alternate exit placement
-        exit_pos = (w - 2, h // 2)
-        if not _cells_connected(player, exit_pos, w, h, walls, {exit_remote, ctrl}):
-            return None
-
-    doors = {}
-    # Primary chain: switch control <-> exit remote (opposite polarity)
-    doors[ctrl] = {
-        "state": 0,  # open — doesn't block alcove awkwardly
-        "linked": [list(exit_remote)],
-        "kind": "local",
-        "handle": "a",
+    doors = {
+        s2: {
+            "state": 0,
+            "linked": [list(r_block)],
+            "kind": "local",
+            "handle": "a",
+        },
+        r_block: {
+            "state": 1,
+            "linked": [list(s2)],
+            "kind": "remote",
+            "handle": "a",
+        },
+        s1: {
+            "state": 0,
+            "linked": [list(r_exit)],
+            "kind": "onesided" if random.random() < 0.6 else "local",
+            "handle": _handle_toward(s1, (vx // 2, hy // 2)),
+        },
+        r_exit: {
+            "state": 1,
+            "linked": [list(s1)],
+            "kind": "remote",
+            "handle": "a",
+        },
     }
-    doors[exit_remote] = {
-        "state": 1,  # closed — must use switch
-        "linked": [list(ctrl)],
-        "kind": "remote",
-        "handle": "a",
+    if doors[s1]["kind"] != "onesided":
+        doors[s1]["handle"] = "a"
+
+    open_all = {e: 0 for e in doors}
+    after_s2 = {e: doors[e]["state"] for e in doors}
+    after_s2[r_block] = 0
+    after_s2[s2] = 1
+    # start: blocked
+    start_map = {e: doors[e]["state"] for e in doors}
+    if exit_pos in _reachable(player, w, h, walls, doors, start_map):
+        return None
+    if exit_pos not in _reachable(player, w, h, walls, doors, open_all):
+        return None
+    # After only opening block, exit still closed (need s1)
+    if exit_pos in _reachable(player, w, h, walls, doors, after_s2):
+        return None
+    # Switch reachable after s2
+    sw = switch_cells[0]
+    if sw not in _reachable(player, w, h, walls, doors, after_s2):
+        return None
+
+    return _finalize(w, h, walls, player, exit_pos, doors, None)
+
+
+# ---------------------------------------------------------------------------
+# Template C: simple switch (mostly filtered out as trivial)
+# ---------------------------------------------------------------------------
+
+def _generate_simple_switch(w, h, difficulty):
+    if w < 5 or h < 4:
+        w, h = max(w, 5), max(h, 4)
+    walls = _outer_walls_only(w, h)
+    vx = max(2, min(w // 2, w - 2))
+    hy = max(2, min(h // 2, h - 2))
+    for y in range(h):
+        walls.add(("v", vx, y))
+    for x in range(vx):
+        walls.add(("h", x, hy))
+    g_x = max(0, min(vx - 1, vx // 2))
+    switch_entry = ("h", g_x, hy)
+    walls.discard(switch_entry)
+    ey = random.choice([y for y in range(hy, h) if 0 < y < h - 1] or [min(h - 2, hy)])
+    r = ("v", vx, ey)
+    walls.discard(r)
+    _force_flanks(walls, r, w, h)
+    for y in range(h):
+        e = ("v", vx, y)
+        if e != r:
+            walls.add(e)
+        else:
+            walls.discard(e)
+    for x in range(vx):
+        e = ("h", x, hy)
+        if e != switch_entry:
+            walls.add(e)
+        else:
+            walls.discard(e)
+
+    switch_cells = [(x, y) for y in range(hy) for x in range(vx)]
+    entry_cells = [(x, y) for y in range(hy, h) for x in range(vx)]
+    exit_cells = [(x, y) for y in range(h) for x in range(vx, w)]
+    s = _place_control_in_region(walls, switch_cells, w, h, {switch_entry, r})
+    if s is None:
+        s = _place_midrun_control(walls, vx, hy, w, h)
+    if s is None:
+        return None
+    player = _pick_cell(entry_cells)
+    exit_pos = _pick_cell(exit_cells)
+    doors = {
+        s: {"state": 0, "linked": [list(r)], "kind": "onesided", "handle": _handle_toward(s, (vx // 2, hy // 2))},
+        r: {"state": 1, "linked": [list(s)], "kind": "remote", "handle": "a"},
     }
+    return _finalize(w, h, walls, player, exit_pos, doors, switch_entry)
 
-    # Control often one-way from inside switch (must enter room first)
-    if random.random() < 0.55 + difficulty * 0.1:
-        doors[ctrl]["kind"] = "onesided"
-        # Handle toward switch interior centroid
-        switch_centroid = (max(0, vx // 2), max(0, hy // 2))
-        doors[ctrl]["handle"] = _handle_toward(ctrl, switch_centroid)
 
-    # Extra spice by difficulty
-    _add_secondary_chain(doors, walls, w, h, vx, hy, player, exit_pos, difficulty)
+def _minimal_fallback(w, h):
+    w, h = max(w, 6), max(h, 5)
+    result = _generate_two_phase(w, h, 2)
+    if result:
+        return result
+    return _generate_simple_switch(w, h, 0)
 
-    # Texture: a few extra permanent walls in exit wing / entry (not sealing)
-    _add_texture_walls(walls, w, h, vx, hy, player, exit_pos, doors)
 
-    # Ensure player not sealed at start
+# ---------------------------------------------------------------------------
+# Shared geometry helpers
+# ---------------------------------------------------------------------------
+
+def _finalize(w, h, walls, player, exit_pos, doors, open_portal):
+    bad = _embed_all_doors_in_walls(doors, walls, w, h)
+    if bad:
+        return None
+    for e in doors:
+        walls.discard(e)
+    if open_portal is not None:
+        walls.discard(open_portal)
+    if not _all_doors_are_wall_gaps(doors, walls, w, h):
+        return None
+
     state_map = {e: d["state"] for e, d in doors.items()}
     if len(_neighbors(*player, w, h, walls, doors, state_map)) == 0:
         return None
-
-    # Must be walk-blocked to exit at start
     if exit_pos in _reachable(player, w, h, walls, doors, state_map):
-        # force exit remote closed
-        doors[exit_remote]["state"] = 1
-        # keep opposite relative to ctrl if linked
-        # (ctrl open / remote closed is already opposite)
-        state_map = {e: doors[e]["state"] for e in doors}
-        if exit_pos in _reachable(player, w, h, walls, doors, state_map):
-            return None
-
+        return None
+    open_map = {e: 0 for e in doors}
+    if exit_pos not in _reachable(player, w, h, walls, doors, open_map):
+        return None
     return w, h, walls, player, exit_pos, doors
 
 
-def _place_switch_control(walls, vx, hy, w, h):
-    """
-    Interior edge fully inside the switch region [0,vx) x [0,hy).
-
-    This is a stand-next-to control panel: both sides stay in the open switch
-    room so closing the door never softlocks the player (they walk around).
-    """
-    if hy < 2 or vx < 3:
-        return None
-
-    candidates = []
-    for ax in range(1, vx):
-        for ay in range(0, hy):
-            e = ("v", ax, ay)
-            if e not in walls:
-                candidates.append(e)
-    for ax in range(0, vx):
-        for ay in range(1, hy):
-            e = ("h", ax, ay)
-            if e not in walls:
-                candidates.append(e)
-    if not candidates:
-        return None
-    return random.choice(candidates)
+def _force_flanks(walls, edge, w, h):
+    for n in _collinear_neighbors(edge, w, h):
+        walls.add(n)
+    walls.discard(edge)
 
 
-def _add_secondary_chain(doors, walls, w, h, vx, hy, player, exit_pos, difficulty):
-    """Second chain for multi-toggle phases at higher difficulty."""
-    if difficulty < 2:
+def _place_control_in_region(walls, cells, w, h, protected):
+    """Prefer existing fully-flanked wall; else build mid-run in region."""
+    cell_set = set(cells)
+    protected = set(p for p in protected if p)
+    cands = []
+    for x, y in cell_set:
+        for nx, ny, edge in (
+            (x + 1, y, ("v", x + 1, y)),
+            (x, y + 1, ("h", x, y + 1)),
+        ):
+            if (nx, ny) not in cell_set or edge in protected:
+                continue
+            if edge in walls and _door_is_fully_flanked(edge, walls, w, h):
+                if len(_collinear_neighbors(edge, w, h)) >= 2:
+                    cands.append(edge)
+    if cands:
+        e = random.choice(cands)
+        walls.discard(e)
+        return e
+    return _build_midrun_in_cells(walls, cells, w, h, protected)
+
+
+def _build_midrun_in_cells(walls, cells, w, h, protected):
+    cell_set = set(cells)
+    # Try vertical mid-run
+    by_col = {}
+    for x, y in cell_set:
+        by_col.setdefault(x, []).append(y)
+    cols = [x for x, ys in by_col.items() if len(ys) >= 3]
+    random.shuffle(cols)
+    for x in cols:
+        ys = sorted(by_col[x])
+        # door at middle row that has y-1 and y+1 in set as cells for vertical edge
+        for y in ys:
+            if y - 1 in ys or y + 1 in ys:
+                # vertical edge ("v", x, y) needs cells (x-1,y) and (x,y) — use interior x
+                pass
+    # Simpler: pick three collinear internal edges
+    for x, y in cell_set:
+        if (x + 1, y) in cell_set and (x + 2, y) in cell_set:
+            # edges between them vertical at x+1 and x+2
+            e0, e1, e2 = ("v", x + 1, y), ("v", x + 2, y), None
+            # need three segments: use horizontal run instead
+        if (x, y + 1) in cell_set and (x, y + 2) in cell_set:
+            # vertical wall line at x+? edges ("h" between rows)
+            pass
+
+    # Vertical line at ax between columns ax-1 and ax, three rows
+    for ax in range(1, w):
+        rows = [y for y in range(h) if (ax - 1, y) in cell_set and (ax, y) in cell_set]
+        rows = sorted(rows)
+        for i in range(len(rows) - 2):
+            y0, y1, y2 = rows[i], rows[i + 1], rows[i + 2]
+            if y1 != y0 + 1 or y2 != y1 + 1:
+                continue
+            # consecutive rows — walls on ("v", ax, y0..y2)
+            ctrl = ("v", ax, y1)
+            if ctrl in protected:
+                continue
+            walls.add(("v", ax, y0))
+            walls.discard(ctrl)
+            walls.add(("v", ax, y2))
+            return ctrl
+
+    for ay in range(1, h):
+        cols = [x for x in range(w) if (x, ay - 1) in cell_set and (x, ay) in cell_set]
+        cols = sorted(cols)
+        for i in range(len(cols) - 2):
+            x0, x1, x2 = cols[i], cols[i + 1], cols[i + 2]
+            if x1 != x0 + 1 or x2 != x1 + 1:
+                continue
+            ctrl = ("h", x1, ay)
+            if ctrl in protected:
+                continue
+            walls.add(("h", x0, ay))
+            walls.discard(ctrl)
+            walls.add(("h", x2, ay))
+            return ctrl
+    return None
+
+
+def _place_midrun_control(walls, vx, hy, w, h):
+    if hy >= 3 and vx >= 2:
+        ax = random.randint(1, vx - 1)
+        door_y = random.randint(1, hy - 2)
+        ctrl = ("v", ax, door_y)
+        walls.add(("v", ax, door_y - 1))
+        walls.discard(ctrl)
+        walls.add(("v", ax, door_y + 1))
+        return ctrl
+    if hy >= 2 and vx >= 3:
+        line_y = random.randint(1, hy - 1)
+        x_mid = random.randint(1, vx - 2)
+        ctrl = ("h", x_mid, line_y)
+        walls.add(("h", x_mid - 1, line_y))
+        walls.discard(ctrl)
+        walls.add(("h", x_mid + 1, line_y))
+        return ctrl
+    return None
+
+
+def _light_chamber_detail(walls, cells, w, h, protected):
+    if len(cells) < 6 or random.random() < 0.5:
         return
-    # Always try at difficulty 2+; success depends on available passages
-
-    # Place another remote on a path edge in exit wing + local in entry
-    passages = [e for e in _all_passages(w, h, walls) if e not in doors and _is_interior_edge(e, w, h)]
-    if len(passages) < 2:
+    cell_set = set(cells)
+    cands = []
+    for x, y in cell_set:
+        for nx, ny, edge in (
+            (x + 1, y, ("v", x + 1, y)),
+            (x, y + 1, ("h", x, y + 1)),
+        ):
+            if (nx, ny) in cell_set and edge not in protected:
+                cands.append(edge)
+    if not cands:
         return
-
-    # Prefer edges near exit vs near player
-    def mid(e):
-        o, x, y = e
-        return (x, y) if o == "v" else (x, y)
-
-    random.shuffle(passages)
-    remote_e = None
-    local_e = None
-    for e in passages:
-        c1, c2 = _cells_through_edge(e)
-        if min(c1[0], c2[0]) >= vx:
-            remote_e = e
-            break
-    for e in passages:
-        if e == remote_e:
-            continue
-        c1, c2 = _cells_through_edge(e)
-        if max(c1[0], c2[0]) < vx and min(c1[1], c2[1]) >= hy:
-            local_e = e
-            break
-    if remote_e is None or local_e is None:
-        return
-
-    doors[remote_e] = {
-        "state": 1,
-        "linked": [list(local_e)],
-        "kind": "remote",
-        "handle": "a",
-    }
-    doors[local_e] = {
-        "state": 0,
-        "linked": [list(remote_e)],
-        "kind": "onesided" if random.random() < 0.5 else "local",
-        "handle": _handle_toward(local_e, player),
-    }
+    edge = random.choice(cands)
+    orient, a, b = edge
+    if orient == "v":
+        for dy in (-1, 0, 1):
+            e = ("v", a, b + dy)
+            if 0 <= b + dy < h and e not in protected:
+                walls.add(e)
+    else:
+        for dx in (-1, 0, 1):
+            e = ("h", a + dx, b)
+            if 0 <= a + dx < w and e not in protected:
+                walls.add(e)
 
 
-def _add_texture_walls(walls, w, h, vx, hy, player, exit_pos, doors):
-    """Scatter a few permanent walls that don't disconnect critical cells."""
-    open_doors = set(doors.keys())
-    candidates = []
+# ---------------------------------------------------------------------------
+# Door flanks
+# ---------------------------------------------------------------------------
+
+def _collinear_neighbors(edge, w, h):
+    orient, x, y = edge
+    out = []
+    if orient == "v":
+        if y - 1 >= 0:
+            out.append(("v", x, y - 1))
+        if y + 1 < h:
+            out.append(("v", x, y + 1))
+    else:
+        if x - 1 >= 0:
+            out.append(("h", x - 1, y))
+        if x + 1 < w:
+            out.append(("h", x + 1, y))
+    return out
+
+
+def _door_is_fully_flanked(edge, walls, w, h):
+    neighbors = _collinear_neighbors(edge, w, h)
+    if len(neighbors) < 2:
+        return False
+    return all(n in walls for n in neighbors)
+
+
+def _embed_door_in_wall(walls, edge, w, h):
+    if not _is_interior_edge(edge, w, h):
+        return False
+    neighbors = _collinear_neighbors(edge, w, h)
+    if len(neighbors) < 2:
+        return False
+    walls.discard(edge)
+    for n in neighbors:
+        walls.add(n)
+    walls.discard(edge)
+    return _door_is_fully_flanked(edge, walls, w, h)
+
+
+def _embed_all_doors_in_walls(doors, walls, w, h):
+    bad = []
+    for edge in list(doors.keys()):
+        if not _embed_door_in_wall(walls, edge, w, h):
+            bad.append(edge)
+        walls.discard(edge)
+    return bad
+
+
+def _all_doors_are_wall_gaps(doors, walls, w, h):
+    for edge in doors:
+        if edge in walls or not _door_is_fully_flanked(edge, walls, w, h):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Graph helpers
+# ---------------------------------------------------------------------------
+
+def _outer_walls_only(w, h):
+    walls = set()
+    for x in range(w):
+        walls.add(("h", x, 0))
+        walls.add(("h", x, h))
     for y in range(h):
-        for x in range(1, w):
-            e = ("v", x, y)
-            if e not in walls and e not in open_doors:
-                candidates.append(e)
-    for y in range(1, h):
-        for x in range(w):
-            e = ("h", x, y)
-            if e not in walls and e not in open_doors:
-                candidates.append(e)
-    random.shuffle(candidates)
-    added = 0
-    for e in candidates:
-        if added >= random.randint(2, 5):
-            break
-        walls.add(e)
-        # revert if we disconnect player from switch gap or exit cells
-        if not _cells_connected(player, exit_pos, w, h, walls, open_doors):
-            walls.discard(e)
-            continue
-        added += 1
+        walls.add(("v", 0, y))
+        walls.add(("v", w, y))
+    return walls
+
+
+def _pick_cell(cells, prefer=None):
+    cells = list(cells)
+    if not cells:
+        return (0, 0)
+    if prefer and prefer in cells:
+        return prefer
+    if prefer:
+        return min(cells, key=lambda c: abs(c[0] - prefer[0]) + abs(c[1] - prefer[1]))
+    return random.choice(cells)
+
+
+def _handle_toward(edge, player):
+    a, b = _cells_through_edge(edge)
+    da = abs(a[0] - player[0]) + abs(a[1] - player[1])
+    db = abs(b[0] - player[0]) + abs(b[1] - player[1])
+    return "a" if da <= db else "b"
+
+
+def _cells_through_edge(edge):
+    orient, x, y = edge
+    if orient == "v":
+        return (x - 1, y), (x, y)
+    return (x, y - 1), (x, y)
+
+
+def _is_interior_edge(edge, w, h):
+    orient, x, y = edge
+    if orient == "v":
+        return 0 < x < w
+    return 0 < y < h
 
 
 def _cells_connected(a, b, w, h, walls, open_edges):
-    """Treat open_edges as non-walls (passable)."""
-    blocked = set(walls)
-    # open_edges are passable
+    open_edges = set(open_edges or [])
     seen = {a}
     q = deque([a])
     while q:
@@ -278,224 +655,12 @@ def _cells_connected(a, b, w, h, walls, open_edges):
         ):
             if not (0 <= nx < w and 0 <= ny < h):
                 continue
-            if edge in blocked and edge not in open_edges:
+            if edge in walls and edge not in open_edges:
                 continue
             if (nx, ny) not in seen:
                 seen.add((nx, ny))
                 q.append((nx, ny))
     return False
-
-
-def _outer_walls_only(w, h):
-    walls = set()
-    for x in range(w):
-        walls.add(("h", x, 0))
-        walls.add(("h", x, h))
-    for y in range(h):
-        walls.add(("v", 0, y))
-        walls.add(("v", w, y))
-    return walls
-
-
-# ---------------------------------------------------------------------------
-# Division fallback (secondary)
-# ---------------------------------------------------------------------------
-
-def _generate_division_fallback(w, h, difficulty):
-    walls, door_slots = _room_division_maze(w, h, difficulty)
-    doors = {}
-    player, exit_pos = _farthest_pair(w, h, walls, doors)
-
-    slots = [e for e in door_slots if _is_interior_edge(e, w, h)]
-    if len(slots) < 3:
-        slots = [e for e in _all_passages(w, h, walls) if _is_interior_edge(e, w, h)]
-
-    path_edges = _shortest_path_edges(player, exit_pos, w, h, walls, {}, {})
-    path_set = set(path_edges)
-    path_slots = [e for e in slots if e in path_set and not _edge_touches_cell(e, player)]
-    off_slots = [e for e in slots if e not in path_set]
-    random.shuffle(path_slots)
-    random.shuffle(off_slots)
-
-    # Force at least one path remote + one off-path local, linked
-    if not path_slots or not off_slots:
-        # degrade gracefully
-        path_slots = path_slots or slots[:1]
-        off_slots = off_slots or slots[1:2]
-
-    exit_remote = path_slots[0]
-    switch_local = off_slots[0]
-    extra_path = path_slots[1:1 + difficulty // 2]
-    extra_off = off_slots[1:2 + difficulty]
-
-    for e in [exit_remote, switch_local] + extra_path + extra_off:
-        doors[e] = {"state": 0, "linked": [], "kind": "local", "handle": "a"}
-
-    doors[exit_remote]["kind"] = "remote"
-    doors[exit_remote]["state"] = 1
-    doors[switch_local]["state"] = 0
-    doors[switch_local]["kind"] = "onesided"
-    doors[switch_local]["handle"] = _handle_toward(switch_local, player)
-    _link(doors, exit_remote, switch_local)
-
-    # Build additional chains from leftovers
-    pool = [e for e in doors if e not in (exit_remote, switch_local)]
-    random.shuffle(pool)
-    while len(pool) >= 2:
-        a, b = pool.pop(), pool.pop()
-        _link(doors, a, b)
-        doors[a]["state"] = random.choice([0, 1])
-        doors[b]["state"] = 1 - doors[a]["state"]
-        if random.random() < 0.4:
-            doors[a]["kind"] = "remote"
-        if random.random() < 0.4 and doors[b]["kind"] != "remote":
-            doors[b]["kind"] = "onesided"
-            doors[b]["handle"] = _handle_toward(b, player)
-
-    state_map = {e: doors[e]["state"] for e in doors}
-    if exit_pos in _reachable(player, w, h, walls, doors, state_map):
-        doors[exit_remote]["state"] = 1
-
-    state_map = {e: doors[e]["state"] for e in doors}
-    if len(_neighbors(*player, w, h, walls, doors, state_map)) == 0:
-        _flip_component(doors, switch_local)
-
-    return w, h, walls, player, exit_pos, doors
-
-
-def _room_division_maze(w, h, difficulty):
-    walls = _full_wall_set(w, h)
-    for y in range(h):
-        for x in range(1, w):
-            walls.discard(("v", x, y))
-    for y in range(1, h):
-        for x in range(w):
-            walls.discard(("h", x, y))
-
-    door_slots = []
-
-    def divide(x0, y0, x1, y1, depth):
-        cw, ch = x1 - x0, y1 - y0
-        min_size = 2
-        if cw < min_size * 2 and ch < min_size * 2:
-            return
-        if cw < min_size or ch < min_size:
-            return
-        if cw > ch:
-            horiz = False
-        elif ch > cw:
-            horiz = True
-        else:
-            horiz = random.choice([True, False])
-
-        if not horiz and cw >= min_size * 2:
-            split = random.randrange(x0 + min_size, x1 - min_size + 1)
-            gaps = max(1, 1 + (1 if difficulty < 2 else 0))
-            gap_rows = random.sample(range(y0, y1), k=min(gaps, y1 - y0))
-            for y in range(y0, y1):
-                e = ("v", split, y)
-                if y in gap_rows:
-                    door_slots.append(e)
-                else:
-                    walls.add(e)
-            divide(x0, y0, split, y1, depth + 1)
-            divide(split, y0, x1, y1, depth + 1)
-        elif horiz and ch >= min_size * 2:
-            split = random.randrange(y0 + min_size, y1 - min_size + 1)
-            gaps = max(1, 1 + (1 if difficulty < 2 else 0))
-            gap_cols = random.sample(range(x0, x1), k=min(gaps, x1 - x0))
-            for x in range(x0, x1):
-                e = ("h", x, split)
-                if x in gap_cols:
-                    door_slots.append(e)
-                else:
-                    walls.add(e)
-            divide(x0, y0, x1, split, depth + 1)
-            divide(x0, split, x1, y1, depth + 1)
-
-    divide(0, 0, w, h, 0)
-    door_slots = [e for e in dict.fromkeys(door_slots) if e not in walls]
-    return walls, door_slots
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-def _link(doors, a, b):
-    if a == b:
-        return
-    if list(b) not in doors[a]["linked"]:
-        doors[a]["linked"].append(list(b))
-    if list(a) not in doors[b]["linked"]:
-        doors[b]["linked"].append(list(a))
-
-
-def _handle_toward(edge, player):
-    a, b = _cells_through_edge(edge)
-    da = abs(a[0] - player[0]) + abs(a[1] - player[1])
-    db = abs(b[0] - player[0]) + abs(b[1] - player[1])
-    return "a" if da <= db else "b"
-
-
-def _flip_component(doors, edge):
-    edge = _norm_edge(edge)
-    stack = [edge]
-    seen = {edge}
-    while stack:
-        e = stack.pop()
-        if e not in doors:
-            continue
-        doors[e]["state"] = 1 - doors[e]["state"]
-        for link in doors[e].get("linked", []):
-            le = _norm_edge(link)
-            if le not in seen and le in doors:
-                seen.add(le)
-                stack.append(le)
-
-
-def _full_wall_set(w, h):
-    walls = set()
-    for y in range(h):
-        for x in range(w + 1):
-            walls.add(("v", x, y))
-    for y in range(h + 1):
-        for x in range(w):
-            walls.add(("h", x, y))
-    return walls
-
-
-def _is_interior_edge(edge, w, h):
-    orient, x, y = edge
-    if orient == "v":
-        return 0 < x < w
-    return 0 < y < h
-
-
-def _all_passages(w, h, walls):
-    passages = []
-    for y in range(h):
-        for x in range(1, w):
-            e = ("v", x, y)
-            if e not in walls:
-                passages.append(e)
-    for y in range(1, h):
-        for x in range(w):
-            e = ("h", x, y)
-            if e not in walls:
-                passages.append(e)
-    return passages
-
-
-def _edge_touches_cell(edge, cell):
-    return cell in _cells_through_edge(edge)
-
-
-def _cells_through_edge(edge):
-    orient, x, y = edge
-    if orient == "v":
-        return (x - 1, y), (x, y)
-    return (x, y - 1), (x, y)
 
 
 def _blocked(edge, walls, doors, door_state_map=None):
@@ -536,67 +701,30 @@ def _reachable(start, w, h, walls, doors, door_state_map=None):
     return seen
 
 
-def _farthest_pair(w, h, walls, doors):
-    open_map = {e: 0 for e in doors}
-    best = None
-    samples = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
-    samples += [(random.randrange(w), random.randrange(h)) for _ in range(5)]
-    for s in samples:
-        dist = {s: 0}
-        q = deque([s])
-        far = s
-        while q:
-            x, y = q.popleft()
-            if dist[(x, y)] >= dist[far]:
-                far = (x, y)
-            for n in _neighbors(x, y, w, h, walls, doors, open_map):
-                if n not in dist:
-                    dist[n] = dist[(x, y)] + 1
-                    q.append(n)
-        d = dist.get(far, 0)
-        if best is None or d > best[0]:
-            best = (d, s, far)
-    if best is None or best[0] < 2:
-        return (0, 0), (w - 1, h - 1)
-    return best[1], best[2]
+def density_metrics(walls, w, h, doors=None):
+    total_int = wall_int = 0
+    for y in range(h):
+        for x in range(1, w):
+            total_int += 1
+            if ("v", x, y) in walls:
+                wall_int += 1
+    for y in range(1, h):
+        for x in range(w):
+            total_int += 1
+            if ("h", x, y) in walls:
+                wall_int += 1
+    return {
+        "wall_ratio": wall_int / total_int if total_int else 0,
+        "avg_degree": 0,
+        "cells": w * h,
+    }
 
 
-def _norm_edge(e):
-    if isinstance(e, (list, tuple)) and len(e) == 3:
-        return (e[0], int(e[1]), int(e[2]))
-    return e
+def meets_density(walls, w, h, doors, difficulty):
+    return True
 
 
-def _shortest_path_edges(start, goal, w, h, walls, doors, door_state_map):
-    parent = {start: None}
-    edge_used = {}
-    q = deque([start])
-    found = False
-    while q:
-        x, y = q.popleft()
-        if (x, y) == goal:
-            found = True
-            break
-        for nx, ny, edge in (
-            (x + 1, y, ("v", x + 1, y)),
-            (x - 1, y, ("v", x, y)),
-            (x, y + 1, ("h", x, y + 1)),
-            (x, y - 1, ("h", x, y)),
-        ):
-            if not (0 <= nx < w and 0 <= ny < h):
-                continue
-            if _blocked(edge, walls, doors, door_state_map):
-                continue
-            if (nx, ny) in parent:
-                continue
-            parent[(nx, ny)] = (x, y)
-            edge_used[(nx, ny)] = edge
-            q.append((nx, ny))
-    if not found:
-        return []
-    edges = []
-    cur = goal
-    while parent[cur] is not None:
-        edges.append(edge_used[cur])
-        cur = parent[cur]
-    return edges
+def density_score(walls, w, h, doors, difficulty):
+    cells = w * h
+    score = 200 - cells * 2
+    return max(0, score), density_metrics(walls, w, h, doors)
